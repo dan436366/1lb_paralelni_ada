@@ -1,118 +1,92 @@
-with Ada.Text_IO; use Ada.Text_IO;
-with Ada.Integer_Text_IO; use Ada.Integer_Text_IO;
-with Ada.Real_Time; use Ada.Real_Time;
-
+with Ada.Text_IO;
+with Ada.Integer_Text_IO;
+with Ada.Numerics.Discrete_Random;
+with Ada.Real_Time;
+with Ada.Unchecked_Deallocation;
 procedure Main is
-
-   Max_Threads : constant := 100;
-   subtype Thread_Index is Integer range 1 .. Max_Threads;
-
-
-   type Flags_Array is array (Thread_Index) of Boolean;
-
-
-   protected type Safe_Output is
-      procedure Print (Msg : String);
-   end Safe_Output;
-
-   protected body Safe_Output is
-      procedure Print (Msg : String) is
-      begin
-         Ada.Text_IO.Put_Line (Msg);
-      end Print;
-   end Safe_Output;
-
-   Console : Safe_Output;
-
-
-   protected type Stop_Manager is
-      procedure Set_Stop(ID : Integer);
-      function Is_Stopped(ID : Integer) return Boolean;
-   private
-      Flags : Flags_Array := (others => False);
-   end Stop_Manager;
-
-   protected body Stop_Manager is
-      procedure Set_Stop(ID : Integer) is
-      begin
-         Flags(ID) := True;
-      end Set_Stop;
-
-      function Is_Stopped(ID : Integer) return Boolean is
-      begin
-         return Flags(ID);
-      end Is_Stopped;
-   end Stop_Manager;
-
-   Stop_Flags : Stop_Manager;
-
-   task type Worker is
-      entry Start (ID : Integer; Step : Integer);
-   end Worker;
-
-   task body Worker is
-      My_ID    : Integer := 0;
-      My_Step  : Integer := 1;
-      Sum      : Long_Long_Integer := 0;
-      Count    : Integer := 0;
-      Current  : Integer := 0;
+   subtype Step_Type is Positive range 1 .. 5;
+   subtype Delay_Type is Positive range 1 .. 5;
+   type Integer_Array is array (Positive range <>) of Integer;
+   task type Sum_Thread(Id : Positive; Step : Step_Type) is
+      entry Stop;
+   end Sum_Thread;
+   type Sum_Thread_Ptr is access Sum_Thread;
+   type Sum_Thread_Ptr_Array is array (Positive range <>) of Sum_Thread_Ptr;
+   procedure Free is new Ada.Unchecked_Deallocation(Sum_Thread, Sum_Thread_Ptr);
+   task body Sum_Thread is
+      Sum   : Long_Long_Integer := 0;
+      Count : Long_Long_Integer := 0;
+      Val   : Long_Long_Integer := 0;
+      Running : Boolean := True;
    begin
-      accept Start (ID : Integer; Step : Integer) do
-         My_ID := ID;
-         My_Step := Step;
-      end Start;
-
-      loop
-         exit when Stop_Flags.Is_Stopped(My_ID);
-         Sum := Sum + Long_Long_Integer(Current);
-         Current := Current + My_Step;
-         Count := Count + 1;
-         delay 0.05;
+      while Running loop
+         select
+            accept Stop do
+               Running := False;
+            end Stop;
+         else
+            Sum := Sum + Val;
+            Val := Val + Long_Long_Integer(Step);
+            Count := Count + 1;
+         end select;
       end loop;
-
-      Console.Print("Thread " & Integer'Image(My_ID) &
-                    ": sum = " & Long_Long_Integer'Image(Sum) &
-                    ", addends = " & Integer'Image(Count));
-   end Worker;
-
-
-   task type Stopper is
-      entry Start (Target_ID : Integer; Delay_Secs : Duration);
-   end Stopper;
-
-   task body Stopper is
-      ID : Integer := 0;
-      Wait : Duration := 1.0;
+      Ada.Text_IO.Put_Line("Thread #" & Id'Image & " sum = " & Long_Long_Integer'Image(Sum) & ", addends = " & Long_Long_Integer'Image(Count));
+   end Sum_Thread;
+   -- Random Generators
+   package Step_Random is new Ada.Numerics.Discrete_Random(Step_Type);
+   package Delay_Random is new Ada.Numerics.Discrete_Random(Delay_Type);
+   G_Step  : Step_Random.Generator;
+   G_Delay : Delay_Random.Generator;
+   function Millis_Since(Start : Ada.Real_Time.Time) return Long_Integer is
+      Now : constant Ada.Real_Time.Time := Ada.Real_Time.Clock;
+      use Ada.Real_Time;
    begin
-      accept Start (Target_ID : Integer; Delay_Secs : Duration) do
-         ID := Target_ID;
-         Wait := Delay_Secs;
-      end Start;
-
-      delay Wait;
-      Stop_Flags.Set_Stop(ID);
-   end Stopper;
-
-
-   Workers  : array (Thread_Index) of Worker;
-   Stoppers : array (Thread_Index) of Stopper;
-
-   Num_Threads : Integer;
-   Step        : Integer;
-
+      return Long_Integer(To_Duration(Now - Start) * 1000.0);
+   end Millis_Since;
+   procedure Controller(Threads : in out Sum_Thread_Ptr_Array; Delays : in Integer_Array) is
+      Start_Time : constant Ada.Real_Time.Time := Ada.Real_Time.Clock;
+      Stopped    : array(1 .. Threads'Length) of Boolean := (others => False);
+   begin
+      loop
+         declare
+            Current_Millis : constant Long_Integer := Millis_Since(Start_Time);
+            All_Stopped    : Boolean := True;
+         begin
+            for I in Threads'Range loop
+               if not Stopped(I) then
+                  All_Stopped := False;
+                  if Current_Millis >= Long_Integer(Delays(I)) then
+                     Threads(I).Stop;
+                     Stopped(I) := True;
+                  end if;
+               end if;
+            end loop;
+            exit when All_Stopped;
+         end;
+      end loop;
+   end Controller;
+   -- Arrays and input
+   Thread_Count : Integer;
 begin
-   Put("Enter number of threads: ");
-   Get(Num_Threads);
-   Put("Enter step of threads: ");
-   Get(Step);
-
-   if Num_Threads > Max_Threads then
-      Put_Line("Too many threads.");
-      return;
-   end if;
-
-   for I in 1 .. Num_Threads loop
-      Workers(I).Start(I, Step);
-      Stoppers(I).Start(I, Duration(I));
-   end loop;
+   Ada.Text_IO.Put("Enter number of threads: ");
+   Ada.Integer_Text_IO.Get(Thread_Count);
+   declare
+      Steps   : Integer_Array(1 .. Thread_Count);
+      Delays  : Integer_Array(1 .. Thread_Count);
+      Threads : Sum_Thread_Ptr_Array(1 .. Thread_Count);
+   begin
+      Step_Random.Reset(G_Step);
+      Delay_Random.Reset(G_Delay);
+      for I in 1 .. Thread_Count loop
+         Steps(I)  := Step_Random.Random(G_Step);
+         Delays(I) := Delay_Random.Random(G_Delay) * 1000;
+      end loop;
+      for I in 1 .. Thread_Count loop
+         Threads(I) := new Sum_Thread(Id => I, Step => Step_Type(Steps(I)));
+      end loop;
+      Controller(Threads, Delays);
+      for I in 1 .. Thread_Count loop
+         Free(Threads(I));
+      end loop;
+   end;
 end Main;
